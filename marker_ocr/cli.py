@@ -1,5 +1,6 @@
 """Command-line interface for Marker OCR."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -64,6 +65,12 @@ console = Console()
     help="Enable verbose output",
 )
 @click.option(
+    "--device",
+    type=click.Choice(["auto", "cpu", "cuda", "mps"]),
+    default=None,
+    help="Device for inference (default: cpu on Apple Silicon, auto elsewhere)",
+)
+@click.option(
     "--info",
     is_flag=True,
     help="Show system and device information",
@@ -78,6 +85,7 @@ def cli(
     dry_run: bool,
     quiet: bool,
     verbose: bool,
+    device: str | None,
     info: bool,
 ) -> None:
     """Marker OCR - Extract text from PDFs using Marker's layout-aware pipeline.
@@ -116,14 +124,19 @@ def cli(
         config = Config(
             pages=pages,
             force_ocr=force_ocr,
+            device=device if device != "auto" else None,
             verbose=verbose,
             quiet=quiet,
             output_dir=output_dir,
         )
 
+        # Must set TORCH_DEVICE before any marker imports
+        config.apply_device()
+
         if not quiet:
             console.print(f"[bold blue]Marker OCR[/bold blue] [dim]v{__version__}[/dim]")
-            console.print("[dim]Loading models (Surya + Texify)...[/dim]\n")
+            device_info = os.environ.get("TORCH_DEVICE", "auto")
+            console.print(f"[dim]Loading models (Surya + Texify) on {device_info}...[/dim]\n")
 
         processor = OCRProcessor(config)
         processor.process(

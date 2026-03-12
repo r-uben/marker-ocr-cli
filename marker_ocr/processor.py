@@ -51,8 +51,9 @@ class OCRProcessor:
         from marker.converters.pdf import PdfConverter
         from marker.models import create_model_dict
 
+        marker_config = self.config.to_marker_config()
         self._artifact_dict = create_model_dict()
-        self._converter = PdfConverter(artifact_dict=self._artifact_dict)
+        self._converter = PdfConverter(artifact_dict=self._artifact_dict, config=marker_config)
         logger.info("Loaded Marker models")
 
     def process(
@@ -178,10 +179,8 @@ class OCRProcessor:
             else:
                 rendered = self._converter(str(file_path))
 
-            # Extract page count from metadata
-            page_count = 0
-            if hasattr(rendered, "metadata") and rendered.metadata:
-                page_count = rendered.metadata.get("pages_processed", 0)
+            # Page count is set on the converter after __call__
+            page_count = self._converter.page_count or 0
 
             # Extract images
             images = {}

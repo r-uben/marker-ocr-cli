@@ -1,5 +1,6 @@
 """Configuration management for Marker OCR CLI."""
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -11,6 +12,7 @@ class Config:
     # Processing
     pages: str | None = None
     force_ocr: bool = False
+    device: str | None = None
     max_file_size_mb: float = 500.0
 
     # Output
@@ -18,6 +20,47 @@ class Config:
     output_dir: Path | None = None
     verbose: bool = False
     quiet: bool = False
+
+    def apply_device(self) -> None:
+        """Set TORCH_DEVICE env var before Marker imports.
+
+        Must be called before any marker imports so that Marker's Settings
+        picks up the override. On macOS/MPS, defaults to cpu because Surya's
+        layout model crashes on Apple Metal.
+        """
+        if self.device:
+            os.environ["TORCH_DEVICE"] = self.device
+        elif not os.environ.get("TORCH_DEVICE"):
+            # MPS is broken for Surya — default to cpu on Apple Silicon
+            import platform
+
+            if platform.processor() == "arm" or platform.machine() == "arm64":
+                os.environ["TORCH_DEVICE"] = "cpu"
+
+    def parse_page_range(self) -> list[int] | None:
+        """Parse --pages string into list of ints for Marker's page_range."""
+        if not self.pages:
+            return None
+
+        pages: list[int] = []
+        for part in self.pages.split(","):
+            part = part.strip()
+            if "-" in part:
+                start, end = part.split("-", 1)
+                pages.extend(range(int(start), int(end) + 1))
+            else:
+                pages.append(int(part))
+        return sorted(set(pages))
+
+    def to_marker_config(self) -> dict:
+        """Build config dict for Marker's PdfConverter."""
+        config: dict = {}
+        page_range = self.parse_page_range()
+        if page_range is not None:
+            config["page_range"] = page_range
+        if self.force_ocr:
+            config["force_ocr"] = True
+        return config
 
     @classmethod
     def from_env(cls) -> "Config":

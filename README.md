@@ -52,6 +52,7 @@ Options:
   --pages TEXT                    Page range (e.g., '0-5' or '1,3,5')
   --force-ocr                     Force OCR on all pages regardless of embedded text
 
+  --device [auto|cpu|cuda|mps]    Inference device (default: cpu on Apple Silicon)
   --reprocess                     Reprocess already-processed files
   --dry-run                       List files without loading models
   -q, --quiet                     Suppress all output except errors
