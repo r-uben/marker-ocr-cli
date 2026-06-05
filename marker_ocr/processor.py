@@ -377,9 +377,10 @@ class OCRProcessor:
         if not reprocess and index.is_completed(rel_key, sha256_checksum(file_path)):
             console.print(f"[yellow]Already processed:[/yellow] {file_path.name}")
             console.print("[dim]Use --reprocess to force reprocessing[/dim]")
-            outcome.add(Status.COMPLETED, output_path=str(markdown_path_for(
-                doc_dir_for(output_root, rel_key), rel_key
-            )))
+            outcome.add(
+                Status.COMPLETED,
+                output_path=str(markdown_path_for(doc_dir_for(output_root, rel_key), rel_key)),
+            )
             return outcome
 
         console.print(f"[blue]Processing:[/blue] {file_path}")
@@ -427,9 +428,7 @@ class OCRProcessor:
                     console.print(f"[dim]Skipping: {rel_key}[/dim]")
                 outcome.add(
                     Status.COMPLETED,
-                    output_path=str(
-                        markdown_path_for(doc_dir_for(output_root, rel_key), rel_key)
-                    ),
+                    output_path=str(markdown_path_for(doc_dir_for(output_root, rel_key), rel_key)),
                 )
             else:
                 files_to_process.append((f, rel_key))
