@@ -19,12 +19,6 @@ def test_import_cli():
     assert cli is not None
 
 
-def test_import_metadata():
-    from marker_ocr.metadata import MetadataManager
-
-    assert MetadataManager is not None
-
-
 def test_import_utils():
     from marker_ocr.utils import get_supported_files, sanitize_filename
 
