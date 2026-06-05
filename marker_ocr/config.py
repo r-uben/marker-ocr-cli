@@ -53,8 +53,14 @@ class Config:
         return sorted(set(pages))
 
     def to_marker_config(self) -> dict:
-        """Build config dict for Marker's PdfConverter."""
-        config: dict = {}
+        """Build config dict for Marker's PdfConverter.
+
+        ``paginate_output`` is forced on so the rendered whole-document markdown
+        carries marker's per-page boundary markers (``{page_id}`` + a rule). We
+        split on those to recover per-page text and re-emit it under the
+        canonical ``## Page N`` headers required by the output contract.
+        """
+        config: dict = {"paginate_output": True}
         page_range = self.parse_page_range()
         if page_range is not None:
             config["page_range"] = page_range

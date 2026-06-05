@@ -24,7 +24,7 @@ console = Console()
 
 
 @click.command()
-@click.argument("input_path", type=click.Path(path_type=Path))
+@click.argument("input_path", type=click.Path(path_type=Path), required=False)
 @click.option(
     "-o",
     "--output-dir",
@@ -77,7 +77,7 @@ console = Console()
 )
 @click.version_option(version=__version__, prog_name="marker-ocr")
 def cli(
-    input_path: Path,
+    input_path: Path | None,
     output_dir: Path | None,
     pages: str | None,
     force_ocr: bool,
@@ -100,14 +100,25 @@ def cli(
     """
     setup_logging(verbose=verbose)
 
-    # Handle --info flag
+    # Handle --info flag (no INPUT_PATH required)
     if info:
         _show_info()
+        return
+
+    # INPUT_PATH is optional only so --info/--version work without it.
+    if input_path is None:
+        cli(["--help"])
         return
 
     # Validate input
     if not input_path.exists():
         console.print(f"[red]Error:[/red] Input path does not exist: {input_path}")
+        sys.exit(1)
+
+    # A single file passed directly must be a PDF (directory inputs are filtered
+    # by extension downstream; a bare non-PDF would otherwise be handed to marker).
+    if input_path.is_file() and not is_pdf_file(input_path):
+        console.print(f"[red]Error:[/red] Unsupported file type (expected PDF): {input_path}")
         sys.exit(1)
 
     # Set quiet mode on processor console too
@@ -139,14 +150,23 @@ def cli(
             console.print(f"[dim]Loading models (Surya + Texify) on {device_info}...[/dim]\n")
 
         processor = OCRProcessor(config)
-        processor.process(
+        outcome = processor.process(
             input_path,
             output_path=output_dir,
             reprocess=reprocess,
         )
 
-        if not quiet:
+        if quiet:
+            # Scripting contract: emit one written output .md path per line.
+            for path in outcome.outputs:
+                click.echo(path)
+        else:
             console.print("\n[bold green]Done![/bold green]\n")
+
+        # Uniform exit policy (canon SYS-02): nonzero if any file failed,
+        # across both single-file and batch runs.
+        if outcome.exit_code != 0:
+            sys.exit(outcome.exit_code)
 
     except ValueError as e:
         console.print(f"\n[red]Error:[/red] {e}\n")
