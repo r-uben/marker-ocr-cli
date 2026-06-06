@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import click
+from ocr_output_contract import iter_input_files, resolve_output_root
 from rich.console import Console
 from rich.table import Table
 
@@ -13,9 +14,9 @@ from marker_ocr.config import Config
 from marker_ocr.processor import OCRProcessor
 from marker_ocr.processor import console as proc_console
 from marker_ocr.utils import (
+    SUPPORTED_EXTENSIONS,
     format_file_size,
     get_pdf_page_count,
-    get_supported_files,
     is_pdf_file,
     setup_logging,
 )
@@ -105,10 +106,13 @@ def cli(
         _show_info()
         return
 
-    # INPUT_PATH is optional only so --info/--version work without it.
+    # INPUT_PATH is optional only so --info/--version work without it. A bare
+    # invocation with no INPUT_PATH (and no --info) is a usage error, not a
+    # successful help path: emit the usage message and exit nonzero (click's
+    # standard exit code 2) so scripts can detect the missing argument.
     if input_path is None:
-        cli(["--help"])
-        return
+        ctx = click.get_current_context()
+        raise click.UsageError("Missing argument 'INPUT_PATH'.", ctx=ctx)
 
     # Validate input
     if not input_path.exists():
@@ -128,7 +132,7 @@ def cli(
 
     # Handle --dry-run (no model loading needed)
     if dry_run:
-        _dry_run(input_path)
+        _dry_run(input_path, output_dir)
         return
 
     try:
@@ -183,9 +187,15 @@ def cli(
         sys.exit(1)
 
 
-def _dry_run(input_path: Path) -> None:
-    """List files that would be processed without loading models."""
-    files = [input_path] if input_path.is_file() else get_supported_files(input_path)
+def _dry_run(input_path: Path, output_dir: Path | None = None) -> None:
+    """List files that would be processed without loading models.
+
+    Uses the SAME discovery as the real run (``iter_input_files`` with the
+    resolved output root excluded) so the dry run never over-reports inputs the
+    real run would skip (e.g. the engine's own ``ocr/`` output subtree).
+    """
+    output_root = resolve_output_root(input_path, output_dir)
+    files = list(iter_input_files(input_path, output_root, SUPPORTED_EXTENSIONS))
 
     if not files:
         console.print("[yellow]No supported files found[/yellow]")

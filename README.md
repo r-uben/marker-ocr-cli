@@ -76,14 +76,14 @@ marker-ocr paper.pdf --force-ocr
 Usage: marker-ocr [OPTIONS] INPUT_PATH
 
 Options:
-  -o, --output-dir PATH           Output directory (default: <input_dir>/marker_ocr_output/)
+  -o, --output-dir PATH           Output directory (default: <input-parent>/ocr/)
   --pages TEXT                    Page range (e.g., '0-5' or '1,3,5')
   --force-ocr                     Force OCR on all pages regardless of embedded text
 
   --device [auto|cpu|cuda|mps]    Inference device (default: cpu on Apple Silicon)
   --reprocess                     Reprocess already-processed files
   --dry-run                       List files without loading models
-  -q, --quiet                     Suppress all output except errors
+  -q, --quiet                     Suppress logs; emit one written .md path per line
   -v, --verbose                   Enable verbose/debug output
   --info                          Show system and device info
   --version                       Show version
@@ -92,16 +92,23 @@ Options:
 
 ## Output structure
 
+Output follows the shared canonical OCR contract (the `ocr-output-contract`
+package): the default root is `<input-parent>/ocr/`, the input subtree is mirrored
+and keyed on the input-relative path (so same-named PDFs in different folders never
+collide), each document's pages live in one `<stem>.md` under `## Page N` headers
+(no YAML frontmatter), and figures are normalised to PNG with links that resolve.
+
 ```
-marker_ocr_output/
+ocr/
 ├── document_name/
-│   ├── document_name.md        # OCR markdown (clean text only)
-│   └── figures/                # extracted figures
-│       ├── figure_1.png
-│       └── figure_2.png
+│   ├── document_name.md        # OCR markdown, pages under '## Page N'
+│   ├── metadata.json           # per-document provenance (status, checksum, ...)
+│   └── figures/                # extracted figures, normalised to PNG
+│       ├── figure_1_page1.png
+│       └── figure_2_page3.png
 ├── another_document/
 │   └── ...
-└── metadata.json               # processing stats, checksums, file list
+└── metadata.json               # root index keyed by input-relative path
 ```
 
 ## How it works

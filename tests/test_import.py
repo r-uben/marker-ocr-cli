@@ -20,7 +20,7 @@ def test_import_cli():
 
 
 def test_import_utils():
-    from marker_ocr.utils import get_supported_files, sanitize_filename
+    from marker_ocr.utils import format_file_size, is_pdf_file
 
-    assert get_supported_files is not None
-    assert sanitize_filename is not None
+    assert format_file_size is not None
+    assert is_pdf_file is not None

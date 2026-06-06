@@ -873,6 +873,8 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "marker-pdf" },
+    { name = "ocr-output-contract" },
+    { name = "pillow" },
     { name = "pypdf" },
     { name = "rich" },
 ]
@@ -898,6 +900,8 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
     { name = "marker-pdf", specifier = ">=0.4.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
+    { name = "ocr-output-contract", git = "https://github.com/r-uben/ocr-output-contract?rev=v0.1.1" },
+    { name = "pillow", specifier = ">=10.0.0" },
     { name = "pypdf", specifier = ">=3.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
@@ -1316,6 +1320,11 @@ source = { registry = "https://pypi.org/simple" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a2/eb/86626c1bbc2edb86323022371c39aa48df6fd8b0a1647bc274577f72e90b/nvidia_nvtx_cu12-12.8.90-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5b17e2001cc0d751a5bc2c6ec6d26ad95913324a4adb86788c944f8ce9ba441f", size = 89954, upload-time = "2025-03-07T01:42:44.131Z" },
 ]
+
+[[package]]
+name = "ocr-output-contract"
+version = "0.1.1"
+source = { git = "https://github.com/r-uben/ocr-output-contract?rev=v0.1.1#14d43eb0ffcab545c5cb4e6228001f10e783856d" }
 
 [[package]]
 name = "openai"

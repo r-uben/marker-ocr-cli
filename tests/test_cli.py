@@ -65,6 +65,18 @@ class TestProcessCommand:
         result = runner.invoke(cli, ["nonexistent.pdf"])
         assert result.exit_code != 0
 
+    def test_missing_input_path_is_usage_error(self, runner):
+        # A bare invocation with no INPUT_PATH (and no --info) must be a usage
+        # error (exit 2), not a successful nested --help (exit 0).
+        result = runner.invoke(cli, [])
+        assert result.exit_code != 0
+        assert "INPUT_PATH" in result.output
+
+    def test_quiet_missing_input_path_is_usage_error(self, runner):
+        # Even under --quiet a missing INPUT_PATH must fail, not silently exit 0.
+        result = runner.invoke(cli, ["--quiet"])
+        assert result.exit_code != 0
+
 
 class TestInfoFlag:
     """Tests for --info flag."""
