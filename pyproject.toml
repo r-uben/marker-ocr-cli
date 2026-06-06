@@ -26,9 +26,11 @@ classifiers = [
 ]
 
 dependencies = [
+    "ocr-output-contract @ git+https://github.com/r-uben/ocr-output-contract@v0.1.3",
     "marker-pdf>=0.4.0",
     "click>=8.1.0",
     "rich>=13.0.0",
+    "pillow>=10.0.0",
     "pypdf>=3.0.0",
 ]
 
@@ -54,6 +56,10 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["marker_ocr"]
+
+# Required so the git+https direct reference to ocr-output-contract is allowed.
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [dependency-groups]
 dev = [

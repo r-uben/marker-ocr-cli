@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 import click
+from ocr_output_contract import iter_input_files, resolve_output_root
 from rich.console import Console
 from rich.table import Table
 
@@ -13,9 +14,9 @@ from marker_ocr.config import Config
 from marker_ocr.processor import OCRProcessor
 from marker_ocr.processor import console as proc_console
 from marker_ocr.utils import (
+    SUPPORTED_EXTENSIONS,
     format_file_size,
     get_pdf_page_count,
-    get_supported_files,
     is_pdf_file,
     setup_logging,
 )
@@ -24,7 +25,7 @@ console = Console()
 
 
 @click.command()
-@click.argument("input_path", type=click.Path(path_type=Path))
+@click.argument("input_path", type=click.Path(path_type=Path), required=False)
 @click.option(
     "-o",
     "--output-dir",
@@ -77,7 +78,7 @@ console = Console()
 )
 @click.version_option(version=__version__, prog_name="marker-ocr")
 def cli(
-    input_path: Path,
+    input_path: Path | None,
     output_dir: Path | None,
     pages: str | None,
     force_ocr: bool,
@@ -100,14 +101,28 @@ def cli(
     """
     setup_logging(verbose=verbose)
 
-    # Handle --info flag
+    # Handle --info flag (no INPUT_PATH required)
     if info:
         _show_info()
         return
 
+    # INPUT_PATH is optional only so --info/--version work without it. A bare
+    # invocation with no INPUT_PATH (and no --info) is a usage error, not a
+    # successful help path: emit the usage message and exit nonzero (click's
+    # standard exit code 2) so scripts can detect the missing argument.
+    if input_path is None:
+        ctx = click.get_current_context()
+        raise click.UsageError("Missing argument 'INPUT_PATH'.", ctx=ctx)
+
     # Validate input
     if not input_path.exists():
         console.print(f"[red]Error:[/red] Input path does not exist: {input_path}")
+        sys.exit(1)
+
+    # A single file passed directly must be a PDF (directory inputs are filtered
+    # by extension downstream; a bare non-PDF would otherwise be handed to marker).
+    if input_path.is_file() and not is_pdf_file(input_path):
+        console.print(f"[red]Error:[/red] Unsupported file type (expected PDF): {input_path}")
         sys.exit(1)
 
     # Set quiet mode on processor console too
@@ -117,7 +132,7 @@ def cli(
 
     # Handle --dry-run (no model loading needed)
     if dry_run:
-        _dry_run(input_path)
+        _dry_run(input_path, output_dir)
         return
 
     try:
@@ -139,14 +154,23 @@ def cli(
             console.print(f"[dim]Loading models (Surya + Texify) on {device_info}...[/dim]\n")
 
         processor = OCRProcessor(config)
-        processor.process(
+        outcome = processor.process(
             input_path,
             output_path=output_dir,
             reprocess=reprocess,
         )
 
-        if not quiet:
+        if quiet:
+            # Scripting contract: emit one written output .md path per line.
+            for path in outcome.outputs:
+                click.echo(path)
+        else:
             console.print("\n[bold green]Done![/bold green]\n")
+
+        # Uniform exit policy (canon SYS-02): nonzero if any file failed,
+        # across both single-file and batch runs.
+        if outcome.exit_code != 0:
+            sys.exit(outcome.exit_code)
 
     except ValueError as e:
         console.print(f"\n[red]Error:[/red] {e}\n")
@@ -163,9 +187,15 @@ def cli(
         sys.exit(1)
 
 
-def _dry_run(input_path: Path) -> None:
-    """List files that would be processed without loading models."""
-    files = [input_path] if input_path.is_file() else get_supported_files(input_path)
+def _dry_run(input_path: Path, output_dir: Path | None = None) -> None:
+    """List files that would be processed without loading models.
+
+    Uses the SAME discovery as the real run (``iter_input_files`` with the
+    resolved output root excluded) so the dry run never over-reports inputs the
+    real run would skip (e.g. the engine's own ``ocr/`` output subtree).
+    """
+    output_root = resolve_output_root(input_path, output_dir)
+    files = list(iter_input_files(input_path, output_root, SUPPORTED_EXTENSIONS))
 
     if not files:
         console.print("[yellow]No supported files found[/yellow]")
@@ -225,11 +255,16 @@ def _show_info() -> None:
 
     console.print()
 
-    try:
-        import marker
+    # Probe the installed distribution version, NOT marker.__version__: marker-pdf
+    # 1.10.2 exposes no module-level __version__, so the old import-and-read probe
+    # falsely reported "not installed" even when OCR worked. importlib.metadata
+    # reads the actual installed package metadata.
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
 
-        console.print(f"[bold]Marker version:[/bold] {marker.__version__}")
-    except (ImportError, AttributeError):
+    try:
+        console.print(f"[bold]Marker version:[/bold] {_pkg_version('marker-pdf')}")
+    except PackageNotFoundError:
         console.print("[yellow]marker-pdf not installed[/yellow]")
 
     console.print()
@@ -239,14 +274,19 @@ def _show_info() -> None:
 
 
 def main() -> None:
-    """Entry point -- handles bare invocations and delegates to cli()."""
-    argv = sys.argv[1:]
+    """Console-script entry point — delegates straight to the Click command.
 
-    # If no args at all, show help
-    if not argv:
-        cli(["--help"])
-        return
+    The packaged ``marker-ocr`` binary MUST honour the same exit-code policy the
+    Click layer enforces. A previous shim intercepted the bare no-arg case and
+    rewrote it to ``cli(['--help'])``, which exits 0 — so the shipped binary
+    returned success on missing required input, breaking the scripting contract
+    (a no-input run that exits 0 is indistinguishable from a successful run).
 
+    Now we delegate directly: ``cli`` raises a Click ``UsageError`` (exit 2) for a
+    bare invocation with no ``INPUT_PATH`` (and no ``--info``), still printing the
+    usage message and a ``Try '... --help'`` hint, so missing input is a nonzero
+    exit while ``--help``/``--info``/``--version`` continue to exit 0.
+    """
     cli()
 
 
