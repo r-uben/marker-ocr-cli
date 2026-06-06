@@ -28,6 +28,7 @@ from ocr_output_contract import (
     Status,
     assemble_pages,
     doc_dir_for,
+    failure_checksum,
     figure_filename,
     figures_dir_for,
     iter_input_files,
@@ -545,14 +546,17 @@ class OCRProcessor:
         status = result.status
         # Record the error/diagnostic for any non-clean status (failed/partial).
         error = None if status is Status.COMPLETED else result.error
-        # safe_checksum so building the FAILED record for an unreadable input does
-        # not itself raise (which would re-trip the SYS-02 abort). An empty-string
-        # checksum is a valid str that never matches a real sha256:, so the doc is
-        # correctly reprocessed (never skipped as "completed") on a later run.
+        # failure_checksum so building the FAILED/PARTIAL record for an unreadable
+        # input does not itself raise (which would re-trip the SYS-02 abort): it
+        # returns the real digest if the file is still readable, else the canonical
+        # ``sha256:`` UNREADABLE_CHECKSUM sentinel (v0.1.3). The conformance harness
+        # requires a ``sha256:`` checksum even on a failure record, so the old ""
+        # fallback is non-conforming. The sentinel never matches a real sha256:, so
+        # the doc is correctly reprocessed (never skipped as "completed") later.
         checksum = (
             sha256_checksum(file_path)
             if status is Status.COMPLETED
-            else (safe_checksum(file_path) or "")
+            else failure_checksum(file_path)
         )
         return DocMetadata(
             status=status,

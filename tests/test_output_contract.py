@@ -153,6 +153,45 @@ class TestProcessorConformance:
             require_failures_nonzero_exit=True,
         )
 
+    def test_unreadable_input_failure_record_has_sha256_checksum(self, processor, tmp_path):
+        """An unreadable input's FAILED record carries a valid ``sha256:`` checksum.
+
+        v0.1.3: the failure record must satisfy the metadata schema (a ``sha256:``
+        checksum) even when the input bytes are unreadable. ``failure_checksum``
+        records the canonical UNREADABLE_CHECKSUM sentinel instead of the old
+        non-conforming ``""``. The sentinel can never equal a real digest, so a
+        later readable run reprocesses rather than skipping it as completed.
+        """
+        import json
+        import os
+        import stat
+
+        from ocr_output_contract import UNREADABLE_CHECKSUM
+
+        pdf = _make_pdf(tmp_path / "sample.pdf", n_pages=1)
+        out = tmp_path / "out"
+        # A genuinely unreadable input: marker cannot convert it, so the doc is a
+        # FAILED record whose checksum must still be a valid ``sha256:`` value.
+        processor._converter.side_effect = RuntimeError("cannot read input")
+        os.chmod(pdf, 0)
+        # chmod(0) does not deny reads when running as root (e.g. some CI); capture
+        # the effective readability so the sentinel assertion only fires when the
+        # input is genuinely unreadable.
+        pdf_was_unreadable = not os.access(pdf, os.R_OK)
+
+        try:
+            outcome = processor.process(pdf, output_path=out)
+            assert outcome.exit_code != 0
+
+            doc_meta = json.loads((out / "sample" / "metadata.json").read_text())
+            assert doc_meta["status"] == "failed"
+            assert doc_meta["checksum"].startswith("sha256:")
+            assert doc_meta["checksum"] != "sha256:"
+            if pdf_was_unreadable:
+                assert doc_meta["checksum"] == UNREADABLE_CHECKSUM
+        finally:
+            os.chmod(pdf, stat.S_IRUSR | stat.S_IWUSR)
+
     def test_inline_figure_link_rewritten_and_resolves(self, processor, tmp_path):
         """Marker's inline ![](<key>) must be REWRITTEN in place to a resolving link.
 
