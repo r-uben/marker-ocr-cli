@@ -38,21 +38,31 @@ def _make_pdf(path: Path, n_pages: int = 3) -> Path:
 
 
 def _paginated_markdown(n_pages: int, inline_images: dict[int, str] | None = None) -> str:
-    """Build marker-style paginated markdown ({page_id} + rule before each page).
+    """Build BYTE-FAITHFUL marker-style paginated markdown.
 
-    ``inline_images`` maps a 1-indexed page number to an inline image src exactly
-    as marker emits it (``![](<dict-key>)``), so tests can reproduce marker's real
-    dangling-inline-link behaviour: the body references the image-dict KEY, which
-    must be rewritten in place to the saved figures/ path.
+    Reproduces exactly what marker-pdf 1.10.2 emits: each page is prefixed with a
+    full-line ``{page_id}`` + rule marker where ``page_id`` is the raw 0-INDEXED
+    page id (renderers/markdown.py builds it from ``data-page-id``), and marker
+    inlines image references as ``![](<dict-key>)`` where the dict key carries the
+    SAME raw ``page_id`` (renderers/html.py keys images via
+    ``ref_block_id.to_path()`` -> ``_page_<page_id>_<Type>_<id>``).
+
+    ``inline_images`` therefore maps a RAW 0-indexed ``page_id`` to the inline
+    image src/dict-key for that page. This is the fix for the prior fixture, which
+    keyed inline images one HIGHER than the page marker (marker {1} paired with
+    key _page_2), masking the figure-page off-by-one because the bumped key
+    happened to match the (also-bumped) body header. With faithful keys, a
+    consumer that mistakenly tagged figures by the raw page_id (no +1) would
+    produce a body 'Page N' / figure 'page N-1' mismatch the suite now catches.
     """
     inline_images = inline_images or {}
     parts = []
-    for i in range(n_pages):
-        body = f"Body text for page {i + 1}."
-        src = inline_images.get(i + 1)
+    for page_id in range(n_pages):
+        body = f"Body text for page {page_id + 1}."
+        src = inline_images.get(page_id)
         if src:
             body += f"\n\n![]({src})"
-        parts.append(f"\n\n{{{i}}}{PAGE_RULE}\n\n{body}")
+        parts.append(f"\n\n{{{page_id}}}{PAGE_RULE}\n\n{body}")
     return "".join(parts)
 
 
@@ -156,11 +166,13 @@ class TestProcessorConformance:
         out = tmp_path / "out"
 
         # Marker hands back a PIL image keyed with its page-encoding name, AND
-        # inlines that same key into page 2's body (the real marker behaviour).
-        marker_key = "_page_2_Figure_0.jpeg"
+        # inlines that same key into the body (the real marker behaviour). The key
+        # carries marker's RAW 0-indexed page_id 1 (the 2nd page), so the figure
+        # belongs to source page 2 -> body '## Page 2' and tag 'page2' must AGREE.
+        marker_key = "_page_1_Figure_0.jpeg"
         img = Image.new("RGB", (20, 20), color="blue")
         rendered = _rendered(
-            _paginated_markdown(2, inline_images={2: marker_key}),
+            _paginated_markdown(2, inline_images={1: marker_key}),
             images={marker_key: img},
         )
         processor._converter.return_value = rendered
@@ -180,7 +192,8 @@ class TestProcessorConformance:
         text = body.read_text()
         # The original dangling marker key must be GONE from the body...
         assert marker_key not in text
-        # ...rewritten in place to the resolving figures/ link...
+        # ...rewritten in place to the resolving figures/ link (page2, matching the
+        # body '## Page 2' header for raw page_id 1)...
         assert "./figures/figure_1_page2.png" in text
         # ...and there must be NO appended '## Figures' section (rewrite, not append).
         assert "## Figures" not in text
@@ -293,18 +306,79 @@ class TestPageCountValidation:
 class TestFigureNumbering:
     """Figures are numbered in source-page order, even for >9 figure pages."""
 
+    def test_figure_page_tag_matches_body_page_number(self, processor, tmp_path):
+        """ROUND-2 BLOCKER: a figure's ``page<P>`` tag MUST equal the body
+        ``## Page N`` header for the SAME source page (whole-document mode).
+
+        Reproduces marker-pdf 1.10.2 byte-faithfully: marker shares ONE raw
+        0-indexed ``page_id`` between the markdown ``{page_id}`` boundary marker
+        and the image-dict key ``_page_<page_id>_..``. We place a figure on raw
+        page_id 1 (the 2nd page). The body header for that page is '## Page 2'
+        (page_id+1), so the figure's tag MUST be 'page2'. Under the old off-by-one
+        (body applied +1, image key did not) the figure was tagged 'page1' while
+        the body read 'Page 2' -- this test asserts they now AGREE, and would FAIL
+        against the pre-fix code. The fixture is faithful (key shares page_id with
+        the marker), so it cannot pass vacuously the way the old fixtures did.
+        """
+        n = 3
+        pdf = _make_pdf(tmp_path / "sample.pdf", n_pages=n)
+        out = tmp_path / "out"
+        figure_page_id = 1  # raw 0-indexed -> the 2nd page -> source page 2
+        marker_key = f"_page_{figure_page_id}_Figure_0.jpeg"
+        rendered = _rendered(
+            _paginated_markdown(n, inline_images={figure_page_id: marker_key}),
+            images={marker_key: Image.new("RGB", (12, 12), color="green")},
+        )
+        processor._converter.return_value = rendered
+
+        outcome = processor.process(pdf, output_path=out)
+        assert outcome.exit_code == 0
+
+        body = (out / "sample" / "sample.md").read_text()
+
+        # Find which ## Page N section carries the (rewritten) figure link, and
+        # extract the page<P> tag from that same link. They MUST be equal.
+        import re
+
+        # The figure link the rewrite produced, e.g. ./figures/figure_1_page2.png
+        link_m = re.search(r"\./figures/figure_\d+_page(\d+)\.png", body)
+        assert link_m, f"no rewritten figure link found in body:\n{body}"
+        figure_tag_page = int(link_m.group(1))
+
+        # Locate the '## Page N' header that immediately precedes the figure link.
+        link_pos = link_m.start()
+        headers = [
+            (m.start(), int(m.group(1))) for m in re.finditer(r"(?m)^## Page (\d+)\s*$", body)
+        ]
+        body_page = next(
+            (num for pos, num in reversed(headers) if pos < link_pos),
+            None,
+        )
+        assert body_page is not None, f"no '## Page N' header before the figure:\n{body}"
+
+        # The canon's page-number fidelity guarantee: figure tag == body header.
+        assert figure_tag_page == body_page, (
+            f"figure page tag (page{figure_tag_page}) != body header "
+            f"(## Page {body_page}) for the same source page (off-by-one)"
+        )
+        # Concretely: raw page_id 1 -> source page 2 for BOTH.
+        assert body_page == figure_page_id + 1 == 2
+        # And the file on disk carries that same page tag.
+        assert (out / "sample" / "figures" / f"figure_1_page{body_page}.png").exists()
+
     def test_numeric_sort_across_many_pages(self, processor, tmp_path):
-        # 12 pages, each with one figure. Lexicographic sort would put
-        # _page_10 before _page_2; numeric sort keeps page order.
+        # 12 pages, each with one figure, keyed by marker's RAW 0-indexed page_id.
+        # Lexicographic sort would put _page_10 before _page_2; numeric sort keeps
+        # page order. Faithful keys: raw page_id p -> source page p+1.
         n = 12
         pdf = _make_pdf(tmp_path / "sample.pdf", n_pages=n)
         out = tmp_path / "out"
         images = {}
         inline = {}
-        for p in range(1, n + 1):
-            key = f"_page_{p}_Figure_0.jpeg"
+        for page_id in range(n):
+            key = f"_page_{page_id}_Figure_0.jpeg"
             images[key] = Image.new("RGB", (8, 8), color="red")
-            inline[p] = key
+            inline[page_id] = key
         processor._converter.return_value = _rendered(
             _paginated_markdown(n, inline_images=inline), images=images
         )
@@ -313,9 +387,10 @@ class TestFigureNumbering:
         assert outcome.exit_code == 0
 
         figures = out / "sample" / "figures"
-        # figure_N must map to page N (numbering follows page order).
-        for p in range(1, n + 1):
-            assert (figures / f"figure_{p}_page{p}.png").exists()
+        # figure_N must map to source page N (= raw page_id N-1); numbering follows
+        # page order with the SAME +1 offset the body headers use.
+        for src_page in range(1, n + 1):
+            assert (figures / f"figure_{src_page}_page{src_page}.png").exists()
         # The harness resolves every inline link and figure naming.
         assert_conforms(
             out,
@@ -334,14 +409,34 @@ class TestFigureNumbering:
         # completed with a dropped figure). Use a value _to_pil cannot coerce.
         pdf = _make_pdf(tmp_path / "sample.pdf", n_pages=1)
         out = tmp_path / "out"
+        # Raw page_id 0 (the only page); un-coercible image value -> save fails.
+        marker_key = "_page_0_Figure_0.jpeg"
         processor._converter.return_value = _rendered(
-            _paginated_markdown(1, inline_images={1: "_page_1_Figure_0.jpeg"}),
-            images={"_page_1_Figure_0.jpeg": object()},  # un-coercible -> save fails
+            _paginated_markdown(1, inline_images={0: marker_key}),
+            images={marker_key: object()},  # un-coercible -> save fails
         )
 
         outcome = processor.process(pdf, output_path=out)
         assert outcome.partial == 1
         assert outcome.exit_code != 0
+
+        # The save failure must NOT leave a dangling inline link in the body, and
+        # the PARTIAL must carry a diagnostic (not error=None).
+        body = (out / "sample" / "sample.md").read_text()
+        assert marker_key not in body  # dangling reference stripped
+        assert "![]" not in body  # no broken inline image markup survives
+        # Conformance: no dangling local image link (would raise otherwise).
+        assert_conforms(
+            out,
+            [ExpectedDoc(rel_key="sample.pdf", pages=1, status="partial")],
+            require_failures_nonzero_exit=True,
+        )
+        # The per-doc metadata records a figure-save diagnostic for the partial.
+        import json
+
+        meta = json.loads((out / "sample" / "metadata.json").read_text())
+        assert meta["status"] == "partial"
+        assert meta["error"] and "figure" in meta["error"].lower()
 
 
 class TestRGBATransparency:
@@ -354,8 +449,8 @@ class TestRGBATransparency:
         p_img = Image.new("P", (10, 10))
         p_img.info["transparency"] = 0
         processor._converter.return_value = _rendered(
-            _paginated_markdown(1, inline_images={1: "_page_1_Figure_0.png"}),
-            images={"_page_1_Figure_0.png": p_img},
+            _paginated_markdown(1, inline_images={0: "_page_0_Figure_0.png"}),
+            images={"_page_0_Figure_0.png": p_img},
         )
 
         processor.process(pdf, output_path=out)

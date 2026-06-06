@@ -255,11 +255,16 @@ def _show_info() -> None:
 
     console.print()
 
-    try:
-        import marker
+    # Probe the installed distribution version, NOT marker.__version__: marker-pdf
+    # 1.10.2 exposes no module-level __version__, so the old import-and-read probe
+    # falsely reported "not installed" even when OCR worked. importlib.metadata
+    # reads the actual installed package metadata.
+    from importlib.metadata import PackageNotFoundError
+    from importlib.metadata import version as _pkg_version
 
-        console.print(f"[bold]Marker version:[/bold] {marker.__version__}")
-    except (ImportError, AttributeError):
+    try:
+        console.print(f"[bold]Marker version:[/bold] {_pkg_version('marker-pdf')}")
+    except PackageNotFoundError:
         console.print("[yellow]marker-pdf not installed[/yellow]")
 
     console.print()
@@ -269,14 +274,19 @@ def _show_info() -> None:
 
 
 def main() -> None:
-    """Entry point -- handles bare invocations and delegates to cli()."""
-    argv = sys.argv[1:]
+    """Console-script entry point — delegates straight to the Click command.
 
-    # If no args at all, show help
-    if not argv:
-        cli(["--help"])
-        return
+    The packaged ``marker-ocr`` binary MUST honour the same exit-code policy the
+    Click layer enforces. A previous shim intercepted the bare no-arg case and
+    rewrote it to ``cli(['--help'])``, which exits 0 — so the shipped binary
+    returned success on missing required input, breaking the scripting contract
+    (a no-input run that exits 0 is indistinguishable from a successful run).
 
+    Now we delegate directly: ``cli`` raises a Click ``UsageError`` (exit 2) for a
+    bare invocation with no ``INPUT_PATH`` (and no ``--info``), still printing the
+    usage message and a ``Try '... --help'`` hint, so missing input is a nonzero
+    exit while ``--help``/``--info``/``--version`` continue to exit 0.
+    """
     cli()
 
 

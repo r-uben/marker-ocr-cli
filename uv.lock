@@ -900,7 +900,7 @@ requires-dist = [
     { name = "click", specifier = ">=8.1.0" },
     { name = "marker-pdf", specifier = ">=0.4.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
-    { name = "ocr-output-contract", git = "https://github.com/r-uben/ocr-output-contract?rev=v0.1.1" },
+    { name = "ocr-output-contract", git = "https://github.com/r-uben/ocr-output-contract?rev=v0.1.2" },
     { name = "pillow", specifier = ">=10.0.0" },
     { name = "pypdf", specifier = ">=3.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0.0" },
@@ -1323,8 +1323,8 @@ wheels = [
 
 [[package]]
 name = "ocr-output-contract"
-version = "0.1.1"
-source = { git = "https://github.com/r-uben/ocr-output-contract?rev=v0.1.1#14d43eb0ffcab545c5cb4e6228001f10e783856d" }
+version = "0.1.2"
+source = { git = "https://github.com/r-uben/ocr-output-contract?rev=v0.1.2#c575222d71d724a4af8e8240051fd6b95c5f4dfa" }
 
 [[package]]
 name = "openai"

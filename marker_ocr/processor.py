@@ -35,6 +35,7 @@ from ocr_output_contract import (
     relative_key,
     resolve_output_root,
     run_fingerprint,
+    safe_checksum,
     sha256_checksum,
     utc_timestamp,
     write_doc_metadata,
@@ -70,7 +71,32 @@ _PAGE_MARKER_RE = re.compile(r"(?m)^[ \t]*\{(\d+)\}-{3,}[ \t]*$")
 
 # Marker's image dict keys encode the source page, e.g. ``_page_1_Figure_0.jpeg``
 # or ``page_2_Picture_3.png``. Capture the first integer that follows ``page``.
+# In marker-pdf 1.10.2 this number is the SAME raw 0-indexed ``page_id`` that the
+# markdown ``{page_id}`` boundary marker carries: the markdown renderer builds the
+# marker from ``data-page-id`` (renderers/markdown.py) and the image key from
+# ``ref_block_id.to_path()`` -> ``_page_<page_id>_<Type>_<id>``
+# (schema/blocks/base.py, renderers/html.py), both using the identical page_id.
 _IMG_PAGE_RE = re.compile(r"page[_\-]?(\d+)", re.IGNORECASE)
+
+# Marker image keys end with the block id, e.g. ``_page_1_Figure_10.jpeg``. Capture
+# the trailing integer so figures sort numerically WITHIN a page (block 10 after
+# block 2), not lexicographically ("_Figure_10" < "_Figure_2" as strings).
+_IMG_BLOCK_RE = re.compile(r"_(\d+)(?:\.[A-Za-z0-9]+)?$")
+
+
+def _marker_page_id_to_source_page(page_id: int) -> int:
+    """Map marker's raw 0-indexed ``page_id`` to a 1-indexed source page number.
+
+    This is the SINGLE source of truth shared by the body ``## Page N`` headers
+    (via :func:`split_marker_pages`) and the figure ``page<P>`` tags (via
+    :func:`OCRProcessor._page_from_image_name`). Because marker-pdf shares one raw
+    ``page_id`` between the markdown boundary marker and the image-dict key, both
+    MUST apply the identical offset or a figure's ``page<P>`` tag drifts off-by-one
+    from the body header for the same physical page (the canon's page-number
+    fidelity guarantee). Clamp to >=1 so a negative/garbage id can never produce a
+    non-positive page label.
+    """
+    return max(1, page_id + 1)
 
 
 def split_marker_pages(markdown: str) -> list[tuple[int, str]]:
@@ -104,8 +130,9 @@ def split_marker_pages(markdown: str) -> list[tuple[int, str]]:
         body = markdown[body_start:body_end].strip()
         if i == 0 and preamble:
             body = (preamble + "\n\n" + body).strip() if body else preamble
-        # marker's page_id is 0-indexed; present a 1-indexed source page number.
-        pages.append((page_id + 1, body))
+        # marker's page_id is 0-indexed; present a 1-indexed source page number
+        # via the shared helper so the body header matches the figure page tag.
+        pages.append((_marker_page_id_to_source_page(page_id), body))
     # A doc that was all markers (no content) collapses to nothing — guard it.
     return pages or [(1, text)]
 
@@ -115,10 +142,12 @@ class OCRResult:
     """Result from processing a document.
 
     ``pages`` holds ``(source_page, markdown_text)`` pairs in order: the source
-    page number (1-indexed; under ``--pages`` this is marker's native page id, so
-    body ``## Page N`` headers and figure ``page<P>`` tags agree) and that page's
-    body. ``success`` is True when marker produced usable text; a conversion
-    error yields empty ``pages`` and an ``error`` string -> ``Status.FAILED``.
+    page number (1-indexed, ``marker page_id + 1``, applied via the SAME
+    :func:`_marker_page_id_to_source_page` helper the figure tags use, so body
+    ``## Page N`` headers and figure ``page<P>`` tags agree for the same source
+    page — both whole-document and under ``--pages``) and that page's body.
+    ``success`` is True when marker produced usable text; a conversion error
+    yields empty ``pages`` and an ``error`` string -> ``Status.FAILED``.
     """
 
     file_path: Path
@@ -304,7 +333,10 @@ class OCRProcessor:
         ``./figures/figure_<N>_page<P>.png`` path. We do NOT append a separate
         ``## Figures`` section: the prior approach left marker's original inline
         link dangling (it pointed at a file that was never written under that
-        name) while duplicating a correct link at the end.
+        name) while duplicating a correct link at the end. For a figure that
+        FAILS to save we strip its inline reference entirely (rather than leaving
+        a dangling ``![](<key>)``), so a PARTIAL document still has no broken
+        local image links.
         """
         doc_dir = doc_dir_for(output_root, rel_key)
         doc_dir.mkdir(parents=True, exist_ok=True)
@@ -316,9 +348,11 @@ class OCRProcessor:
             body = "*[OCR Failed]*\n"
 
         # Save figures and rewrite the inline links the body already carries.
-        link_map = self._save_figures(result, doc_dir)
+        link_map, failed_keys = self._save_figures(result, doc_dir)
         if link_map:
             body = self._rewrite_inline_figure_links(body, link_map)
+        if failed_keys:
+            body = self._strip_inline_figure_links(body, failed_keys)
 
         markdown_path.write_text(body, encoding="utf-8")
 
@@ -327,33 +361,45 @@ class OCRProcessor:
 
         return markdown_path
 
-    def _save_figures(self, result: OCRResult, doc_dir: Path) -> dict[str, str]:
-        """Persist marker's images as PNG; return ``{marker_key: relative_link}``.
+    def _save_figures(self, result: OCRResult, doc_dir: Path) -> tuple[dict[str, str], list[str]]:
+        """Persist marker's images as PNG.
+
+        Returns ``(link_map, failed_keys)`` where ``link_map`` is
+        ``{marker_key: relative_link}`` for the figures that saved and
+        ``failed_keys`` is the marker keys whose save raised.
 
         Marker's image keys encode the source page (e.g. ``_page_1_Figure_0``)
         AND are byte-identical to the inline ``src`` marker wrote into the body.
         We parse the source page, save under ``figures/figure_<N>_page<P>.png``,
         and return a mapping from the marker key to the resolving relative link so
-        the caller can rewrite the inline references in place.
+        the caller can rewrite the inline references in place. The caller MUST also
+        drop the inline references for ``failed_keys`` so a save failure does not
+        leave a dangling ``![](<key>)`` link in the body.
 
         Figures are numbered in source-page order (numeric sort, so
         ``_page_10`` follows ``_page_2`` — lexicographic sort mis-numbered docs
         with >9 figure-bearing pages). A save failure flags the result as
-        ``degraded`` (-> ``Status.PARTIAL``) instead of silently dropping the
-        figure while still recording ``completed``.
+        ``degraded`` (-> ``Status.PARTIAL``) and sets ``result.error`` so the
+        partial carries a diagnostic instead of recording ``error=None``.
         """
         if not result.images:
-            return {}
+            return {}, []
 
         figures_dir = figures_dir_for(doc_dir)
         figures_dir.mkdir(parents=True, exist_ok=True)
         link_map: dict[str, str] = {}
+        failed_keys: list[str] = []
         figure_counter = 0
-        # Sort numerically by (source page, key) so figure_N follows page order
-        # even for documents with more than nine figure-bearing pages.
+        # Sort numerically by (source page, intra-page block id, key) so figure_N
+        # tracks source/block order even for docs with >9 figure-bearing pages OR
+        # >9 figures on one page (block 10 after block 2, not lexicographically).
         ordered = sorted(
             result.images.items(),
-            key=lambda kv: (self._page_from_image_name(kv[0]), kv[0]),
+            key=lambda kv: (
+                self._page_from_image_name(kv[0]),
+                self._block_id_from_image_name(kv[0]),
+                kv[0],
+            ),
         )
         for img_name, img in ordered:
             page_no = self._page_from_image_name(img_name)
@@ -368,10 +414,20 @@ class OCRProcessor:
             except Exception as e:
                 logger.warning(f"Failed to save figure {img_name!r}: {e}")
                 figure_counter -= 1
-                # A dropped figure leaves a dangling inline link in the body and
-                # loses content: record the doc as partial, not completed.
+                failed_keys.append(img_name)
+                # A dropped figure loses content: record the doc as partial, not
+                # completed. The caller strips its inline reference so no dangling
+                # link survives in the body.
                 result.degraded = True
-        return link_map
+
+        if failed_keys:
+            # Record a diagnostic on the result so the PARTIAL is not stored with
+            # error=None (an undiagnosed degraded document).
+            detail = f"failed to save {len(failed_keys)} figure(s): " + ", ".join(
+                repr(k) for k in failed_keys
+            )
+            result.error = f"{result.error}; {detail}" if result.error else detail
+        return link_map, failed_keys
 
     @staticmethod
     def _rewrite_inline_figure_links(body: str, link_map: dict[str, str]) -> str:
@@ -387,17 +443,50 @@ class OCRProcessor:
         return body
 
     @staticmethod
+    def _strip_inline_figure_links(body: str, keys: list[str]) -> str:
+        """Remove the whole inline image ``![..](<key>)`` for un-saved figures.
+
+        A figure that failed to save has no file on disk; leaving marker's inline
+        ``![](<key>)`` would be a dangling local image link (the exact failure the
+        rewrite path eliminates). We strip the full inline image markup for each
+        failed key so the body carries no broken reference; the loss is recorded
+        as ``Status.PARTIAL`` with a diagnostic in metadata. Longest keys first so
+        a shorter key is not matched inside a longer one.
+        """
+        for key in sorted(keys, key=len, reverse=True):
+            # Match an optional alt-text image: ![ ... ](<key>)
+            pattern = re.compile(r"!\[[^\]]*\]\(" + re.escape(key) + r"\)")
+            body = pattern.sub("", body)
+        return body
+
+    @staticmethod
     def _page_from_image_name(name: str) -> int:
         """Extract the 1-indexed source page from a marker image key.
 
-        Marker keys look like ``_page_1_Figure_0.jpeg``. The captured number is
-        marker's page id (0-indexed in the markdown markers but 1-indexed in the
-        image keys for current marker-pdf); we clamp to at least 1.
+        Marker keys look like ``_page_1_Figure_0.jpeg`` where the captured number
+        is marker's raw 0-indexed ``page_id`` -- the SAME id the body's
+        ``{page_id}`` boundary marker carries. We route it through
+        :func:`_marker_page_id_to_source_page`, the identical offset
+        :func:`split_marker_pages` applies, so the figure ``page<P>`` tag matches
+        the body ``## Page N`` header for the same source page (no off-by-one, and
+        page_id 0 vs 1 no longer collide on the first two pages).
         """
         m = _IMG_PAGE_RE.search(name)
         if not m:
             return 1
-        return max(1, int(m.group(1)))
+        return _marker_page_id_to_source_page(int(m.group(1)))
+
+    @staticmethod
+    def _block_id_from_image_name(name: str) -> int:
+        """Extract the trailing block id from a marker image key for sorting.
+
+        Marker keys end ``..._<BlockType>_<block_id>.<ext>``; the block id is the
+        intra-page source/reading order. Used as the secondary sort key so figures
+        within one page number in block order (block 10 after block 2), not the
+        lexicographic order of the raw string key. Falls back to 0 when absent.
+        """
+        m = _IMG_BLOCK_RE.search(name)
+        return int(m.group(1)) if m else 0
 
     @staticmethod
     def _to_pil(img: Any) -> Image.Image:
@@ -427,15 +516,23 @@ class OCRProcessor:
 
     @property
     def fingerprint(self) -> str:
-        """Run-config fingerprint consulted on resume (model/backend/task/prompt).
+        """Run-config fingerprint consulted on resume.
 
-        ``task`` encodes the marker run parameters that change *what output a
-        given input produces* (force-ocr, the page subset), so a re-run under a
-        different ``--force-ocr`` / ``--pages`` reprocesses rather than silently
-        reusing a cached render. Marker takes no free-text prompt.
+        Passes the marker run parameters that change *what output a given input
+        produces* as RESOLVED output-affecting flags via ``extra`` (the contract's
+        v0.1.2 mechanism), so a re-run under a different ``--force-ocr`` /
+        ``--pages`` reprocesses rather than silently reusing a cached render. The
+        page subset is the NORMALISED page-id list (``parse_page_range``), so
+        ``--pages 1,3`` and ``--pages 3,1`` and ``--pages 1-3`` fingerprint by
+        their actual effect, not by the raw string. Marker takes no free-text
+        prompt and has no task selector.
         """
-        task = f"force_ocr={self.config.force_ocr};pages={self.config.pages or ''}"
-        return run_fingerprint(model=MODEL, backend=BACKEND, task=task)
+        page_range = self.config.parse_page_range()
+        extra = {
+            "force_ocr": bool(self.config.force_ocr),
+            "pages": page_range,  # normalised list[int] | None
+        }
+        return run_fingerprint(model=MODEL, backend=BACKEND, extra=extra)
 
     def _build_doc_metadata(
         self,
@@ -448,9 +545,18 @@ class OCRProcessor:
         status = result.status
         # Record the error/diagnostic for any non-clean status (failed/partial).
         error = None if status is Status.COMPLETED else result.error
+        # safe_checksum so building the FAILED record for an unreadable input does
+        # not itself raise (which would re-trip the SYS-02 abort). An empty-string
+        # checksum is a valid str that never matches a real sha256:, so the doc is
+        # correctly reprocessed (never skipped as "completed") on a later run.
+        checksum = (
+            sha256_checksum(file_path)
+            if status is Status.COMPLETED
+            else (safe_checksum(file_path) or "")
+        )
         return DocMetadata(
             status=status,
-            checksum=sha256_checksum(file_path),
+            checksum=checksum,
             model=MODEL,
             backend=BACKEND,
             processing_time=result.processing_time,
@@ -517,8 +623,14 @@ class OCRProcessor:
         rel_key = relative_key(file_path, file_path.parent)
         index = RootIndex(output_root)
 
-        if not reprocess and index.is_completed(
-            rel_key, sha256_checksum(file_path), fingerprint=self.fingerprint
+        # Idempotency pre-check uses safe_checksum: an unreadable input yields
+        # None (never raises), so we fall through to processing, which records a
+        # per-file FAILED instead of aborting the run (the SYS-02 contract).
+        checksum = safe_checksum(file_path)
+        if (
+            not reprocess
+            and checksum is not None
+            and index.is_completed(rel_key, checksum, fingerprint=self.fingerprint)
         ):
             # The .md is verified on-disk by is_completed, so emitting its path is
             # safe for quiet scripting (the file genuinely exists).
@@ -576,8 +688,15 @@ class OCRProcessor:
         files_to_process: list[tuple[Path, str]] = []
         for f in files:
             rel_key = relative_key(f, dir_path)
-            if not reprocess and index.is_completed(
-                rel_key, sha256_checksum(f), fingerprint=self.fingerprint
+            # safe_checksum (not sha256_checksum) so an input that became
+            # unreadable between discovery and this pre-filter yields None instead
+            # of raising and aborting the whole batch (SYS-02). A None checksum
+            # falls through to processing, which records that one file as FAILED.
+            checksum = safe_checksum(f)
+            if (
+                not reprocess
+                and checksum is not None
+                and index.is_completed(rel_key, checksum, fingerprint=self.fingerprint)
             ):
                 if self.config.verbose:
                     console.print(f"[dim]Skipping: {rel_key}[/dim]")
@@ -597,7 +716,13 @@ class OCRProcessor:
         start_time = time.time()
 
         for file_path, rel_key in files_to_process:
-            file_size = format_file_size(file_path.stat().st_size)
+            # Display-only stat, guarded: a race-deleted file must not abort the
+            # remaining batch here (SYS-02). process_file re-stats inside its own
+            # try/except, so an unreadable file is still recorded as FAILED below.
+            try:
+                file_size = format_file_size(file_path.stat().st_size)
+            except OSError:
+                file_size = "?"
             console.print(f"[cyan]{rel_key}[/cyan] ({file_size})")
 
             result = self.process_file(file_path, show_progress=False)
